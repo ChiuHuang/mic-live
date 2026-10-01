@@ -866,7 +866,7 @@
       busy = false;
       gateOn = true;
       gateApplied = -1;
-      ramp(outGain.gain, settings.master / 100);
+      pushMaster();          // 走 masterGain()，喇叭模式的 85% 上限才會生效
       startMeter();
 
       say(MESSAGES.live);
@@ -891,8 +891,8 @@
       setTracksEnabled(true);
       gateOn = true;
       gateApplied = -1;
-      ramp(outGain.gain, settings.master / 100);
       live = true;
+      pushMaster();
       startMeter();
       say(MESSAGES.live);
       render();
@@ -1050,7 +1050,7 @@
       if (document.hidden || !live || !ctx) return;
       if (ctx.state === 'suspended') ctx.resume();
       setTracksEnabled(true);
-      ramp(outGain.gain, settings.master / 100);
+      pushMaster();
     });
 
     // ---------------------------------------------------------------- 起始
