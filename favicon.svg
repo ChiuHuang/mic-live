@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="麥克風即時監聽">
+  <circle cx="32" cy="32" r="32" fill="#6750a4"/>
+  <g fill="#ffffff">
+    <rect x="25.6" y="15.6" width="12.8" height="17.6" rx="6.4"/>
+    <path d="M18.4 28h3.2a10.4 10.4 0 0 0 20.8 0h3.2a13.6 13.6 0 0 1-11.2 13.32V47h-4.8v-5.68A13.6 13.6 0 0 1 18.4 28z"/>
+    <rect x="22.4" y="47.4" width="19.2" height="4.2" rx="2.1"/>
+  </g>
+</svg>

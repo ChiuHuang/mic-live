@@ -80,6 +80,23 @@ python -m http.server 8080
 
 開 <http://localhost:8080/>。
 
+## PWA
+
+可以加到主畫面當成一個 App 用，離線也開得起來。
+
+- `manifest.webmanifest` — 名稱、圖示（any + maskable）、`display: standalone`
+- `sw.js` — 預先抓 `index.html` / mdui / 圖示。頁面導覽先走網路再退回快取，
+  靜態檔用 stale-while-revalidate。改了 `sw.js` 裡的 `VERSION` 就是一次新快取。
+- 圖示是 `tools/make-icons.cjs` 算出來的（只用 Node 內建的 zlib 手寫 PNG 編碼器，
+  圖形用 signed distance field 畫），要改樣式改那支腳本重跑就好：
+
+```powershell
+node tools\make-icons.cjs
+```
+
+`start_url` 和 `scope` 用相對的 `.`，所以 GitHub Pages 的子路徑 `/mic-live/` 也不會壞。
+瀏覽器說可以安裝時會跳一次提示（長輩不會自己找「加入主畫面」）。
+
 ## 線上版
 
 - Vercel（正式）：<https://mic-live.vercel.app>
@@ -96,8 +113,13 @@ vercel deploy --prod --yes --scope chiuhuang-projects
 ## 目錄
 
 ```
-index.html          整個網站，單一檔案
-vendor/mdui.css     mdui 2.1.5（MIT）
+index.html               整個網站，單一檔案
+manifest.webmanifest     PWA 設定
+sw.js                    離線用
+favicon.svg              分頁圖示
+icons/*.png              PWA 圖示（由 tools/make-icons.cjs 產生）
+tools/make-icons.cjs     圖示產生器
+vendor/mdui.css          mdui 2.1.5（MIT）
 vendor/mdui.global.js
 ```
 
