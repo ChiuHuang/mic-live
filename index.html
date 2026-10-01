@@ -251,6 +251,7 @@
 
   .row { display: flex; flex-direction: column; gap: .3rem; }
   .row > .label { font-size: 1.25rem; font-weight: 500; }
+  .row > .label small { display: block; font-size: 1rem; font-weight: 400; color: var(--c-muted); }
   .row > .sub { font-size: 1rem; color: var(--c-muted); }
 
   .row.inline {
@@ -343,6 +344,11 @@
       <div class="row inline">
         <span class="label">顯示音量條</span>
         <mdui-switch id="s-meter" checked-icon="" aria-label="顯示音量條"></mdui-switch>
+      </div>
+
+      <div class="row inline">
+        <span class="label">測試聲音<small>按一下會「嗯」一聲。聽不到就代表輸出有問題</small></span>
+        <mdui-button id="s-test" variant="tonal">測試</mdui-button>
       </div>
 
       <div class="row">
@@ -665,6 +671,52 @@
       if (outGain) ramp(outGain.gain, masterGain());
     }
 
+    // iOS 會在麥克風開始之後把 AudioContext 掛起來，而且不 await resume() 的話
+    // 那個 resume 常常不會生效。這裡等到真的 running，失敗會講出來。
+    function wakeContext() {
+      if (!ctx || ctx.state === 'running') return Promise.resolve(true);
+      var p = ctx.state === 'suspended' ? ctx.resume() : Promise.resolve();
+      return p.catch(function () {}).then(function () {
+        return ctx.state === 'running';
+      });
+    }
+
+    var SILENT_HINT = '麥克風有訊號，但瀏覽器沒有開聲音。請把 iPhone 側邊的靜音撥片撥到有聲音的位置，或插上耳機再試一次。';
+
+    // 走同一條輸出線路送一段 440 Hz：出聲 = 輸出段正常，沒聲 = 輸出段或系統沒通
+    function testTone() {
+      if (!ctx) ensureContext();
+      wakeContext();
+      var wasLive = live;
+      if (!wasLive && outGain) ramp(outGain.gain, 0.25, 0.02);
+
+      var osc = ctx.createOscillator();
+      var g = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = 440;
+      g.gain.value = 0.0001;
+      osc.connect(g);
+      g.connect(limiter);        // 接在音量計之後，麥克風以外的每一段都經過
+
+      var t = ctx.currentTime;
+      g.gain.exponentialRampToValueAtTime(0.25, t + 0.03);
+      g.gain.setValueAtTime(0.25, t + 0.45);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.65);
+      osc.start(t);
+      osc.stop(t + 0.7);
+
+      setTimeout(function () {
+        try { g.disconnect(); osc.disconnect(); } catch (e) {}
+        if (!wasLive) pushMaster();
+      }, 900);
+
+      mdui.snackbar({
+        message: '測試聲音送出了。聽不到的話，問題在輸出或系統音量，不在麥克風。',
+        messageLine: 2,
+        autoCloseDelay: 6000
+      });
+    }
+
     // 切換耳機 / 喇叭模式：只改參數，不重開麥克風，所以不會再跳權限提示
     function applyMode() {
       paintModeText();
@@ -947,18 +999,19 @@
         device.hidden = !device.textContent;
       }
 
-      if (ctx.state === 'suspended') ctx.resume();
+      // iOS 在這一步已經把 context 掛起了，所以要在 promise 裡面叫醒並且確認
+      return wakeContext().then(function (running) {
+        live = true;
+        busy = false;
+        gateOn = true;
+        gateApplied = -1;
+        pushMaster();          // 走 masterGain()，喇叭模式的 85% 上限才會生效
+        startMeter();
 
-      live = true;
-      busy = false;
-      gateOn = true;
-      gateApplied = -1;
-      pushMaster();          // 走 masterGain()，喇叭模式的 85% 上限才會生效
-      startMeter();
-
-      say(MESSAGES.live);
-      render();
-      refreshDevices();
+        say(running ? MESSAGES.live : SILENT_HINT, !running);
+        render();
+        refreshDevices();
+      });
     }
 
     function fail(err) {
@@ -974,15 +1027,16 @@
     // 從「暫停」回來：麥克風還開著，只是音量 0，所以不用再問一次權限
     function resumeFromPause() {
       if (!ctx) return start();
-      if (ctx.state === 'suspended') ctx.resume();
       setTracksEnabled(true);
       gateOn = true;
       gateApplied = -1;
       live = true;
-      pushMaster();
-      startMeter();
-      say(MESSAGES.live);
-      render();
+      wakeContext().then(function (running) {
+        pushMaster();
+        startMeter();
+        say(running ? MESSAGES.live : SILENT_HINT, !running);
+        render();
+      });
     }
 
     function pause() {
@@ -1065,6 +1119,10 @@
       closeSettings();
     });
 
+    document.getElementById('s-test').addEventListener('click', function () {
+      testTone();
+    });
+
     document.getElementById('sheetScrim').addEventListener('click', function () {
       closeSettings();
     });
@@ -1141,9 +1199,12 @@
     // 手機鎖屏或切到背景會把 AudioContext 掛起，回到前景要自己叫醒
     document.addEventListener('visibilitychange', function () {
       if (document.hidden || !live || !ctx) return;
-      if (ctx.state === 'suspended') ctx.resume();
       setTracksEnabled(true);
-      pushMaster();
+      wakeContext().then(function (running) {
+        pushMaster();
+        startMeter();
+        if (!running) say(SILENT_HINT, true);
+      });
     });
 
     // ---------------------------------------------------------------- 起始
