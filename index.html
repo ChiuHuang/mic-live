@@ -1,0 +1,807 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="description" content="按一下就聽到麥克風的聲音，再按一下暫停。">
+<title>麥克風即時監聽</title>
+
+<link rel="stylesheet" href="vendor/mdui.css">
+
+<script>
+  // 先把主題掛上去，避免深色模式的人看到一瞬間的白畫面
+  try {
+    var t = JSON.parse(localStorage.getItem('mic-live.settings.v1') || '{}').theme;
+    if (t === 'dark' || t === 'light' || t === 'auto') {
+      document.documentElement.classList.add('mdui-theme-' + t);
+      if (t !== 'auto') document.documentElement.style.colorScheme = t;
+    }
+  } catch (e) {}
+</script>
+
+<style>
+  :root {
+    /* mdui 的色票是三通道字串，要用 rgb() 包起來；括號裡是還沒載入時的備用值 */
+    --c-primary: rgb(var(--mdui-color-primary, 103 80 164));
+    --c-on-primary: rgb(var(--mdui-color-on-primary, 255 255 255));
+    --c-on-surface: rgb(var(--mdui-color-on-surface, 29 27 32));
+    --c-muted: rgb(var(--mdui-color-on-surface-variant, 73 69 79));
+    --c-surface: rgb(var(--mdui-color-surface-container-high, 231 224 236));
+    --c-error: rgb(var(--mdui-color-error, 179 38 30));
+    --c-quiet: rgba(var(--mdui-color-on-surface-variant, 73 69 79), .16);
+  }
+
+  html, body { height: 100%; }
+
+  body {
+    margin: 0;
+    font-size: 1.125rem;
+    -webkit-tap-highlight-color: transparent;
+    overscroll-behavior: none;
+  }
+
+  .stage {
+    min-height: 100vh;
+    min-height: 100dvh;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1.5rem;
+    padding: 2rem 1.5rem calc(2rem + env(safe-area-inset-bottom));
+    text-align: center;
+  }
+
+  .title {
+    margin: 0;
+    font-size: 2rem;
+    font-weight: 600;
+  }
+
+  /* ---------- 主按鈕 ---------- */
+  .pad-wrap {
+    position: relative;
+    display: grid;
+    place-items: center;
+    width: 15rem;
+    height: 15rem;
+  }
+
+  .pad {
+    width: 13rem;
+    height: 13rem;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    cursor: pointer;
+    display: grid;
+    place-items: center;
+    background: var(--c-primary);
+    color: var(--c-on-primary);
+    box-shadow: 0 .75rem 1.5rem rgba(0, 0, 0, .18);
+    transition: transform .12s ease, background-color .2s ease;
+  }
+
+  .pad:active { transform: scale(.94); }
+  .pad:focus-visible { outline: 4px solid var(--c-primary); outline-offset: .4rem; }
+  .pad[disabled] { cursor: default; }
+
+  .pad svg { width: 6.5rem; height: 6.5rem; fill: currentColor; display: block; }
+
+  body.live .pad { background: var(--c-error); }
+
+  /* 錄音中的呼吸圈 */
+  .ring {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    border: .2rem solid var(--c-primary);
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .ring.on { animation: pulse 2s ease-out infinite; }
+
+  @keyframes pulse {
+    0%       { opacity: .5;  transform: scale(.85); }
+    70%,100% { opacity: 0;    transform: scale(1.35); }
+  }
+
+  .spinner {
+    width: 5rem;
+    height: 5rem;
+    border-radius: 50%;
+    border: .5rem solid rgba(255, 255, 255, .35);
+    border-top-color: #fff;
+    animation: spin 1s linear infinite;
+  }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ---------- 狀態文字 ---------- */
+  #state {
+    margin: 0;
+    min-height: 2.2em;
+    font-size: 1.5rem;
+    font-weight: 500;
+    line-height: 1.45;
+    max-width: 18em;
+  }
+
+  body.live #state { color: var(--c-primary); }
+  #state.bad { color: var(--c-error); }
+
+  #device {
+    margin: 0;
+    font-size: 1rem;
+    color: var(--c-muted);
+    overflow-wrap: anywhere;
+  }
+
+  .hint {
+    margin: 0;
+    max-width: 20em;
+    font-size: 1.125rem;
+    line-height: 1.7;
+    color: var(--c-muted);
+  }
+
+  /* ---------- 音量條 ---------- */
+  .meter {
+    display: none;
+    width: 14rem;
+    height: .75rem;
+    border-radius: 999px;
+    background: var(--c-quiet);
+    overflow: hidden;
+  }
+
+  .meter.on { display: block; }
+  .meter > i { display: block; height: 100%; width: 0; background: var(--c-primary); }
+
+  /* ---------- 設定鈕 ---------- */
+  .gear {
+    position: fixed;
+    top: 1rem;
+    right: 1rem;
+    width: 3.75rem;
+    height: 3.75rem;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    cursor: pointer;
+    display: grid;
+    place-items: center;
+    background: var(--c-surface);
+    color: var(--c-on-surface);
+    box-shadow: 0 .25rem .75rem rgba(0, 0, 0, .16);
+  }
+
+  .gear svg { width: 1.9rem; height: 1.9rem; fill: currentColor; display: block; }
+  .gear:focus-visible { outline: 3px solid var(--c-primary); outline-offset: .25rem; }
+
+  /* ---------- 設定對話框 ---------- */
+  mdui-dialog { --shape-corner: 1.75rem; }
+  mdui-dialog::part(body) { width: min(24rem, 84vw); }
+
+  .rows { display: flex; flex-direction: column; gap: 1.4rem; }
+
+  .row { display: flex; flex-direction: column; gap: .3rem; }
+  .row > .label { font-size: 1.25rem; font-weight: 500; }
+  .row > .sub { font-size: 1rem; color: var(--c-muted); }
+
+  .row.inline {
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    min-height: 3rem;
+  }
+
+  .row.inline > .label { flex: 1; }
+
+  mdui-slider { width: 100%; --mdui-slider-handle-size: 2rem; }
+
+  mdui-select { width: 100%; font-size: 1.125rem; }
+  mdui-switch { --shape-corner-thumb: 999px; transform: scale(1.15); }
+
+  @media (prefers-reduced-motion: reduce) {
+    .ring.on { animation: none; opacity: .3; }
+    .spinner { animation-duration: 3s; }
+    .pad { transition: none; }
+  }
+</style>
+</head>
+
+<body>
+  <button class="gear" id="gear" type="button" aria-label="設定">
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7zm7.43-2.53a7.7 7.7 0 0 0 0-1.94l2.11-1.65a.5.5 0 0 0 .12-.64l-2-3.46a.5.5 0 0 0-.61-.22l-2.49 1a7.3 7.3 0 0 0-1.69-.98l-.38-2.65a.49.49 0 0 0-.49-.42h-4a.49.49 0 0 0-.49.42l-.38 2.65c-.61.25-1.17.59-1.69.98l-2.49-1a.49.49 0 0 0-.61.22l-2 3.46a.5.5 0 0 0 .12.64l2.11 1.65a7.7 7.7 0 0 0 0 1.94l-2.11 1.65a.5.5 0 0 0-.12.64l2 3.46c.12.22.38.31.61.22l2.49-1c.52.4 1.08.73 1.69.98l.38 2.65c.04.24.24.42.49.42h4c.25 0 .46-.18.49-.42l.38-2.65c.61-.25 1.17-.58 1.69-.98l2.49 1c.23.09.49 0 .61-.22l2-3.46a.5.5 0 0 0-.12-.64l-2.11-1.65z"/>
+    </svg>
+  </button>
+
+  <mdui-layout class="stage">
+    <h1 class="title">麥克風即時監聽</h1>
+
+    <div class="pad-wrap">
+      <div class="ring" id="ring" aria-hidden="true"></div>
+      <button class="pad" id="pad" type="button" aria-label="開始播放麥克風" aria-pressed="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8 5v14l11-7z"/></svg>
+      </button>
+    </div>
+
+    <div class="meter" id="meter" aria-hidden="true"><i id="meterFill"></i></div>
+
+    <p id="state">按下面的大按鈕開始</p>
+    <p id="device" hidden></p>
+
+    <p class="hint">請戴耳機使用。不戴耳機的話，麥克風會聽到自己發出的聲音而尖叫。</p>
+  </mdui-layout>
+
+  <mdui-dialog id="settings" headline="設定" close-on-overlay-click close-on-esc>
+    <div class="rows">
+      <div class="row">
+        <span class="label">聲音大小</span>
+        <mdui-slider id="s-master" min="0" max="150" step="5"></mdui-slider>
+      </div>
+
+      <div class="row">
+        <span class="label">麥克風靈敏度</span>
+        <span class="sub">麥克風太小聲時，調高這一項</span>
+        <mdui-slider id="s-input" min="0" max="200" step="10"></mdui-slider>
+      </div>
+
+      <div class="row">
+        <span class="label">使用哪個麥克風</span>
+        <mdui-select id="s-device" variant="outlined" end-icon="">
+          <mdui-menu-item value="">預設</mdui-menu-item>
+        </mdui-select>
+      </div>
+
+      <div class="row inline">
+        <span class="label">沒人講話時自動靜音</span>
+        <mdui-switch id="s-gate" checked-icon="" aria-label="沒人講話時自動靜音"></mdui-switch>
+      </div>
+
+      <div class="row inline">
+        <span class="label">顯示音量條</span>
+        <mdui-switch id="s-meter" checked-icon="" aria-label="顯示音量條"></mdui-switch>
+      </div>
+
+      <div class="row">
+        <span class="label">畫面顏色</span>
+        <mdui-select id="s-theme" variant="outlined" end-icon="">
+          <mdui-menu-item value="auto">跟著系統</mdui-menu-item>
+          <mdui-menu-item value="light">淺色</mdui-menu-item>
+          <mdui-menu-item value="dark">深色</mdui-menu-item>
+        </mdui-select>
+      </div>
+    </div>
+
+    <mdui-button slot="action" variant="text" id="s-reset">還原成預設值</mdui-button>
+    <mdui-button slot="action" variant="filled" id="s-done">完成</mdui-button>
+  </mdui-dialog>
+
+  <script src="vendor/mdui.global.js"></script>
+  <script>
+  (function () {
+    'use strict';
+
+    var KEY = 'mic-live.settings.v1';
+    var GATE_DB = -55;          // 低於這個音量就自動靜音
+    var GATE_HYSTERESIS = 6;   // 高出 6 dB 才又打開，避免在臨界點跳來跳去
+    var FADE = 0.02;            // 20 毫秒的音量漸變，開關不會「啵」一聲
+
+    var DEFAULTS = {
+      master: 100,   // 聲音大小 %
+      input: 100,    // 麥克風靈敏度 %
+      deviceId: '',  // 麥克風，空白 = 系統預設
+      gate: false,   // 沒人講話時自動靜音
+      meter: false,  // 顯示音量條
+      theme: 'auto'  // auto | light | dark
+    };
+    var LIMITS = { master: [0, 150], input: [0, 200] };
+
+    var settings = readSettings();
+
+    // ---------------------------------------------------------------- 元素
+    var pad = document.getElementById('pad');
+    var ring = document.getElementById('ring');
+    var meter = document.getElementById('meter');
+    var meterFill = document.getElementById('meterFill');
+    var state = document.getElementById('state');
+    var device = document.getElementById('device');
+    var gear = document.getElementById('gear');
+    var dlg = document.getElementById('settings');
+
+    var sMaster = document.getElementById('s-master');
+    var sInput = document.getElementById('s-input');
+    var sDevice = document.getElementById('s-device');
+    var sGate = document.getElementById('s-gate');
+    var sMeter = document.getElementById('s-meter');
+    var sTheme = document.getElementById('s-theme');
+
+    var ICON_PLAY = '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8 5v14l11-7z"/></svg>';
+    var ICON_PAUSE = '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>';
+    var SPINNER = '<div class="spinner"></div>';
+
+    // ---------------------------------------------------------------- 音訊
+    var ctx = null;
+    var source = null;
+    var stream = null;
+    var inGain = null;
+    var analyser = null;
+    var gateGain = null;
+    var outGain = null;
+    // 用 float 版本：byte 版本在 -48 dB 以下全部變成 0，音量條的底端會消失
+    var buf = new Float32Array(1024);
+    var gateOn = true;
+    var gateApplied = -1;
+    var raf = 0;
+
+    var live = false;   // 目前真的有聲音在輸出
+    var busy = false;   // 正在開麥克風／等權限
+
+    // ---------------------------------------------------------------- 設定
+    function readSettings() {
+      var out = {};
+      var raw = null;
+      try { raw = JSON.parse(localStorage.getItem(KEY) || '{}'); } catch (e) {}
+      if (!raw || typeof raw !== 'object') raw = {};
+
+      Object.keys(DEFAULTS).forEach(function (k) {
+        var d = DEFAULTS[k];
+        var v = raw[k];
+        if (typeof d === 'number') {
+          var lim = LIMITS[k] || [0, 100];
+          out[k] = typeof v === 'number' && isFinite(v) ? Math.min(lim[1], Math.max(lim[0], v)) : d;
+        } else if (typeof d === 'boolean') {
+          out[k] = typeof v === 'boolean' ? v : d;
+        } else {
+          out[k] = typeof v === 'string' ? v.slice(0, 200) : d;
+        }
+      });
+
+      if (['auto', 'light', 'dark'].indexOf(out.theme) < 0) out.theme = DEFAULTS.theme;
+      return out;
+    }
+
+    function saveSettings() {
+      try { localStorage.setItem(KEY, JSON.stringify(settings)); } catch (e) {}
+    }
+
+    function syncControls() {
+      sMaster.value = settings.master;
+      sInput.value = settings.input;
+      sDevice.value = settings.deviceId;
+      sGate.checked = settings.gate;
+      sMeter.checked = settings.meter;
+      sTheme.value = settings.theme;
+      sMaster.labelFormatter = pct;
+      sInput.labelFormatter = pct;
+    }
+
+    function pct(v) { return v + '%'; }
+
+    // ---------------------------------------------------------------- 訊息
+    var MESSAGES = {
+      idle: '按下面的大按鈕開始',
+      opening: '正在開啟麥克風…',
+      live: '正在播放麥克風的聲音',
+      paused: '已暫停',
+      unplugged: '麥克風被拔掉了，請重新按一下按鈕',
+      denied: '麥克風沒有被允許。請按網址旁邊的小圖，選「允許」，再按一次按鈕。',
+      insecure: '這個網頁不能用麥克風。請改用 https 網址，或在電腦上用 http://localhost 開啟。',
+      missing: '找不到麥克風，請確認麥克風有插好。',
+      busy: '麥克風正被別的程式使用，請先關掉那個程式。',
+      unknown: '麥克風開不起來，請重新整理頁面再試一次。'
+    };
+
+    var ERRORS = {
+      NotAllowedError: MESSAGES.denied,
+      PermissionDeniedError: MESSAGES.denied,
+      SecurityError: MESSAGES.insecure,
+      NotFoundError: MESSAGES.missing,
+      DevicesNotFoundError: MESSAGES.missing,
+      NotReadableError: MESSAGES.busy,
+      TrackStartError: MESSAGES.unknown,
+      AbortError: MESSAGES.unknown,
+      OverconstrainedError: MESSAGES.missing
+    };
+
+    function say(text, bad) {
+      state.textContent = text;
+      state.classList.toggle('bad', !!bad);
+    }
+
+    function complain(err) {
+      var msg = ERRORS[err && err.name] || MESSAGES.unknown;
+      say(msg, true);
+      mdui.snackbar({ message: msg, messageLine: 3, closeable: true, autoCloseDelay: 9000 });
+    }
+
+    // ---------------------------------------------------------------- 音訊圖
+    // source -> 麥克風靈敏度 -> 音量計 -> 自動靜音 -> 聲音大小 -> 喇叭
+    function ensureContext() {
+      if (ctx) return ctx;
+      var AC = window.AudioContext || window.webkitAudioContext;
+      ctx = new AC({ latencyHint: 'interactive' });
+
+      inGain = ctx.createGain();
+      inGain.gain.value = settings.input / 100;
+
+      analyser = ctx.createAnalyser();
+      analyser.fftSize = buf.length;
+      analyser.smoothingTimeConstant = 0;
+
+      gateGain = ctx.createGain();
+      gateGain.gain.value = 1;
+
+      outGain = ctx.createGain();
+      outGain.gain.value = 0;
+
+      inGain.connect(analyser);
+      analyser.connect(gateGain);
+      gateGain.connect(outGain);
+      outGain.connect(ctx.destination);
+
+      return ctx;
+    }
+
+    function ramp(param, to, seconds) {
+      if (!ctx) return;
+      var now = ctx.currentTime;
+      param.cancelScheduledValues(now);
+      param.setValueAtTime(param.value, now);
+      param.linearRampToValueAtTime(to, now + (seconds === undefined ? FADE : seconds));
+    }
+
+    function setTracksEnabled(on) {
+      if (!stream) return;
+      stream.getAudioTracks().forEach(function (t) { t.enabled = on; });
+    }
+
+    function applyLevels() {
+      if (!ctx) return;
+      if (inGain) ramp(inGain.gain, settings.input / 100, 0.05);
+      if (outGain) ramp(outGain.gain, live ? settings.master / 100 : 0);
+    }
+
+    // ---------------------------------------------------------------- 音量計 / 自動靜音
+    function levelDb() {
+      if (!analyser) return -100;
+      analyser.getFloatTimeDomainData(buf);
+      var sum = 0;
+      for (var i = 0; i < buf.length; i++) {
+        var v = buf[i];
+        sum += v * v;
+      }
+      var rms = Math.sqrt(sum / buf.length);
+      return rms > 0 ? Math.max(-100, 20 * Math.log10(rms)) : -100;
+    }
+
+    function tick() {
+      raf = requestAnimationFrame(tick);
+      var db = levelDb();
+
+      if (settings.meter) {
+        var pctFull = Math.max(0, Math.min(1, (db + 60) / 60));
+        meterFill.style.width = Math.round(pctFull * 100) + '%';
+      }
+
+      if (settings.gate) {
+        if (gateOn && db < GATE_DB) gateOn = false;
+        else if (!gateOn && db > GATE_DB + GATE_HYSTERESIS) gateOn = true;
+      } else {
+        gateOn = true;
+      }
+
+      var want = gateOn ? 1 : 0;
+      if (want !== gateApplied) {
+        gateApplied = want;
+        if (gateGain) ramp(gateGain.gain, want, 0.04);
+      }
+    }
+
+    function startMeter() {
+      if (!raf) tick();
+    }
+
+    function stopMeter() {
+      if (raf) cancelAnimationFrame(raf);
+      raf = 0;
+      meterFill.style.width = '0%';
+    }
+
+    // ---------------------------------------------------------------- 麥克風
+    function constraints() {
+      var c = {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false
+      };
+      if (settings.deviceId) c.deviceId = { exact: settings.deviceId };
+      return c;
+    }
+
+    function dropStream() {
+      var s = stream;
+      stream = null; // 先斷開參照，track.stop() 引起的 ended 不會回來第二次
+      if (!s) return;
+      if (source) {
+        try { source.disconnect(); } catch (e) {}
+        source = null;
+      }
+      s.getTracks().forEach(function (t) { t.stop(); });
+      device.textContent = '';
+      device.hidden = true;
+    }
+
+    function stopAll(message, bad) {
+      live = false;
+      busy = false;
+      gateOn = true;
+      gateApplied = 1;
+      if (gateGain) ramp(gateGain.gain, 1, 0.01);
+      if (outGain) ramp(outGain.gain, 0, 0.01);
+      stopMeter();
+      dropStream();
+      say(message || MESSAGES.paused, bad);
+      render();
+    }
+
+    function start() {
+      if (!window.isSecureContext || !navigator.mediaDevices ||
+          !navigator.mediaDevices.getUserMedia) {
+        complain({ name: 'SecurityError' });
+        return;
+      }
+
+      busy = true;
+      say(MESSAGES.opening);
+      render();
+
+      // 全部在點擊事件裡發生，Safari 才肯把 AudioContext 開成 running
+      ensureContext();
+      var wake = ctx.state === 'suspended' ? ctx.resume() : Promise.resolve();
+
+      wake
+        .catch(function () {})
+        .then(function () {
+          // 監聽自己不需要任何後處理，關掉才會是原音
+          return navigator.mediaDevices.getUserMedia({ audio: constraints(), video: false });
+        })
+        .then(function (s) {
+          return onStream(s);
+        })
+        .catch(function (err) {
+          // 選的麥克風可能已經不見了，忘掉這個選擇再試一次
+          if (settings.deviceId && (err.name === 'NotFoundError' ||
+              err.name === 'OverconstrainedError' || err.name === 'DevicesNotFoundError')) {
+            settings.deviceId = '';
+            saveSettings();
+            sDevice.value = '';
+            refreshDevices();
+            return navigator.mediaDevices
+              .getUserMedia({ audio: constraints(), video: false })
+              .then(onStream)
+              .catch(function (err2) { fail(err2); });
+          }
+          fail(err);
+        });
+    }
+
+    function onStream(s) {
+      stream = s;
+      source = ctx.createMediaStreamSource(s);
+      source.connect(inGain);
+
+      var track = s.getAudioTracks()[0];
+      if (track) {
+        track.addEventListener('ended', function () {
+          stopAll(MESSAGES.unplugged, true);
+        });
+        device.textContent = track.label || '';
+        device.hidden = !device.textContent;
+      }
+
+      if (ctx.state === 'suspended') ctx.resume();
+
+      live = true;
+      busy = false;
+      gateOn = true;
+      gateApplied = -1;
+      ramp(outGain.gain, settings.master / 100);
+      startMeter();
+
+      say(MESSAGES.live);
+      render();
+      refreshDevices();
+    }
+
+    function fail(err) {
+      busy = false;
+      live = false;
+      stopMeter();
+      dropStream();
+      if (outGain) ramp(outGain.gain, 0, 0.01);
+      complain(err);
+      render();
+    }
+
+    // 從「暫停」回來：麥克風還開著，只是音量 0，所以不用再問一次權限
+    function resumeFromPause() {
+      if (!ctx) return start();
+      if (ctx.state === 'suspended') ctx.resume();
+      setTracksEnabled(true);
+      gateOn = true;
+      gateApplied = -1;
+      ramp(outGain.gain, settings.master / 100);
+      live = true;
+      startMeter();
+      say(MESSAGES.live);
+      render();
+    }
+
+    function pause() {
+      ramp(outGain.gain, 0, 0.015);
+      setTracksEnabled(false);
+      stopMeter();
+      live = false;
+      say(MESSAGES.paused);
+      render();
+    }
+
+    // 換麥克風：整條 stream 收掉重開，權限已經記住了所以不會再跳提示
+    function reopen() {
+      if (!stream) return;
+      dropStream();
+      stopMeter();
+      if (outGain) ramp(outGain.gain, 0, 0.01);
+      start();
+    }
+
+    // ---------------------------------------------------------------- 麥克風清單
+    function refreshDevices() {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+      navigator.mediaDevices.enumerateDevices().then(function (list) {
+        var mics = [];
+        for (var i = 0; i < list.length; i++) {
+          if (list[i].kind !== 'audioinput') continue;
+          var prev = mics[mics.length - 1];
+          // 還沒拿到麥克風權限時，deviceId 全是空字串，只留第一個免得選單全是重複項目
+          if (prev && !list[i].label && prev.deviceId === list[i].deviceId) continue;
+          mics.push(list[i]);
+        }
+
+        var ids = mics.map(function (d) { return d.deviceId; });
+        if (settings.deviceId && ids.indexOf(settings.deviceId) < 0 && ids.length) {
+          settings.deviceId = '';
+          saveSettings();
+          if (stream) reopen();   // 存的麥克風不見了，回到系統預設
+        }
+
+        while (sDevice.firstChild) sDevice.removeChild(sDevice.firstChild);
+        var def = document.createElement('mdui-menu-item');
+        def.setAttribute('value', '');
+        def.textContent = '預設';
+        sDevice.appendChild(def);
+        mics.forEach(function (d, i) {
+          var o = document.createElement('mdui-menu-item');
+          o.setAttribute('value', d.deviceId);
+          o.textContent = d.label || ('麥克風 ' + (i + 1));
+          sDevice.appendChild(o);
+        });
+        sDevice.value = settings.deviceId;
+      }).catch(function () {});
+    }
+
+    // ---------------------------------------------------------------- 畫面
+    function render() {
+      pad.disabled = busy;
+      ring.classList.toggle('on', live);
+      meter.classList.toggle('on', settings.meter);
+      document.body.classList.toggle('live', live);
+      pad.innerHTML = busy ? SPINNER : (live ? ICON_PAUSE : ICON_PLAY);
+      pad.setAttribute('aria-pressed', live ? 'true' : 'false');
+      pad.setAttribute('aria-label', busy ? '開啟中' : (live ? '暫停' : '開始播放麥克風'));
+    }
+
+    // ---------------------------------------------------------------- 事件
+    pad.addEventListener('click', function () {
+      if (busy) return;
+      if (live) pause();
+      else if (stream && ctx) resumeFromPause();
+      else start();
+    });
+
+    gear.addEventListener('click', function () {
+      syncControls();
+      refreshDevices();
+      dlg.open = true;
+    });
+
+    document.getElementById('s-done').addEventListener('click', function () {
+      dlg.open = false;
+    });
+
+    document.getElementById('s-reset').addEventListener('click', function () {
+      settings = Object.assign({}, DEFAULTS);
+      saveSettings();
+      syncControls();
+      mdui.setTheme(settings.theme);
+      render();
+      refreshDevices();
+      applyLevels();
+      if (stream) reopen();
+    });
+
+    sMaster.addEventListener('input', function () {
+      settings.master = Number(sMaster.value);
+      saveSettings();
+      applyLevels();
+    });
+
+    sInput.addEventListener('input', function () {
+      settings.input = Number(sInput.value);
+      saveSettings();
+      applyLevels();
+    });
+
+    sGate.addEventListener('change', function () {
+      settings.gate = sGate.checked;
+      saveSettings();
+    });
+
+    sMeter.addEventListener('change', function () {
+      settings.meter = sMeter.checked;
+      saveSettings();
+      render();
+    });
+
+    sTheme.addEventListener('change', function () {
+      settings.theme = sTheme.value;
+      saveSettings();
+      mdui.setTheme(settings.theme);
+      document.documentElement.style.colorScheme =
+        settings.theme === 'auto' ? '' : settings.theme;
+    });
+
+    sDevice.addEventListener('change', function () {
+      settings.deviceId = sDevice.value;
+      saveSettings();
+      if (stream) reopen();
+    });
+
+    if (navigator.mediaDevices && 'ondevicechange' in navigator.mediaDevices) {
+      navigator.mediaDevices.ondevicechange = function () {
+        refreshDevices();
+        if (stream && settings.deviceId) reopen();
+      };
+    }
+
+    // 換頁／關分頁就把麥克風還回去，不然麥克風的指示燈會一直亮著
+    window.addEventListener('pagehide', function () {
+      stopMeter();
+      dropStream();
+    });
+
+    // 手機鎖屏或切到背景會把 AudioContext 掛起，回到前景要自己叫醒
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden || !live || !ctx) return;
+      if (ctx.state === 'suspended') ctx.resume();
+      setTracksEnabled(true);
+      ramp(outGain.gain, settings.master / 100);
+    });
+
+    // ---------------------------------------------------------------- 起始
+    mdui.setTheme(settings.theme);
+    syncControls();
+    render();
+    refreshDevices();
+  })();
+  </script>
+</body>
+</html>
