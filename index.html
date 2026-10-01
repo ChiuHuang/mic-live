@@ -5,8 +5,16 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
 <meta name="description" content="按一下就聽到麥克風的聲音，再按一下暫停。">
+<meta name="theme-color" content="#fef7ff" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#141218" media="(prefers-color-scheme: dark)">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="麥克風">
 <title>麥克風即時監聽</title>
 
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <link rel="stylesheet" href="vendor/mdui.css">
 
 <script>
@@ -164,8 +172,9 @@
   /* ---------- 設定鈕 ---------- */
   .gear {
     position: fixed;
-    top: 1rem;
-    right: 1rem;
+    top: calc(1rem + env(safe-area-inset-top));
+    right: calc(1rem + env(safe-area-inset-right));
+    z-index: 30;                 /* 一定要壓過頁面內容，不然點不到 */
     width: 3.75rem;
     height: 3.75rem;
     padding: 0;
@@ -177,16 +186,68 @@
     background: var(--c-surface);
     color: var(--c-on-surface);
     box-shadow: 0 .25rem .75rem rgba(0, 0, 0, .16);
+    touch-action: manipulation;
   }
 
-  .gear svg { width: 1.9rem; height: 1.9rem; fill: currentColor; display: block; }
+  .gear svg { width: 1.9rem; height: 1.9rem; fill: currentColor; display: block; pointer-events: none; }
   .gear:focus-visible { outline: 3px solid var(--c-primary); outline-offset: .25rem; }
 
-  /* ---------- 設定對話框 ---------- */
-  mdui-dialog { --shape-corner: 1.75rem; }
-  mdui-dialog::part(body) { width: min(24rem, 84vw); }
+  /* ---------- 設定面板 ---------- */
+  /* 用 class 切顯示，不用 [hidden]：自訂元件常常自己寫 display，那樣會蓋掉瀏覽器的規則 */
+  .sheet {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 1.25rem;
+    box-sizing: border-box;
+  }
 
-  .rows { display: flex; flex-direction: column; gap: 1.4rem; }
+  .sheet.on { display: flex; }
+
+  .sheet-scrim {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, .45);
+  }
+
+  .sheet-panel {
+    position: relative;
+    width: min(26rem, 100%);
+    max-height: calc(100vh - 2.5rem);
+    max-height: calc(100dvh - 2.5rem);
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    padding: 1.5rem;
+    border-radius: 1.75rem;
+    background: rgb(var(--mdui-color-surface-container-high, 231 224 236));
+    color: rgb(var(--mdui-color-on-surface, 29 27 32));
+    box-shadow: 0 1rem 2.5rem rgba(0, 0, 0, .3);
+  }
+
+  .sheet-title {
+    margin: 0 0 1rem;
+    font-size: 1.5rem;
+    font-weight: 500;
+  }
+
+  .sheet-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: .5rem;
+    padding-top: 1rem;
+  }
+
+  .rows {
+    display: flex;
+    flex-direction: column;
+    gap: 1.4rem;
+    overflow: auto;            /* 內容太多時面板自己捲 */
+    min-height: 0;
+  }
 
   .row { display: flex; flex-direction: column; gap: .3rem; }
   .row > .label { font-size: 1.25rem; font-weight: 500; }
@@ -240,8 +301,13 @@
     <p class="hint" id="hint">請戴耳機使用。不戴耳機的話，麥克風會聽到自己發出的聲音而尖叫。</p>
   </mdui-layout>
 
-  <mdui-dialog id="settings" headline="設定" close-on-overlay-click close-on-esc>
-    <div class="rows">
+  <!-- 設定面板自己做，不要用 mdui-dialog：它的顯示是 JS 動態寫 style.display，
+       一旦那邊卡在 await 就整個不會出現，而且沒有退路。 -->
+  <div class="sheet" id="settings">
+    <div class="sheet-scrim" id="sheetScrim"></div>
+    <div class="sheet-panel" role="dialog" aria-modal="true" aria-label="設定">
+      <h2 class="sheet-title">設定</h2>
+      <div class="rows">
       <div class="row">
         <span class="label">用什麼方式聽</span>
         <mdui-select id="s-mode" variant="outlined" end-icon="">
@@ -287,11 +353,14 @@
           <mdui-menu-item value="dark">深色</mdui-menu-item>
         </mdui-select>
       </div>
-    </div>
+      </div>
 
-    <mdui-button slot="action" variant="text" id="s-reset">還原成預設值</mdui-button>
-    <mdui-button slot="action" variant="filled" id="s-done">完成</mdui-button>
-  </mdui-dialog>
+      <div class="sheet-actions">
+        <mdui-button variant="text" id="s-reset">還原成預設值</mdui-button>
+        <mdui-button variant="filled" id="s-done">完成</mdui-button>
+      </div>
+    </div>
+  </div>
 
   <script src="vendor/mdui.global.js"></script>
   <script>
@@ -325,7 +394,8 @@
     var device = document.getElementById('device');
     var hint = document.getElementById('hint');
     var gear = document.getElementById('gear');
-    var dlg = document.getElementById('settings');
+    var sheet = document.getElementById('settings');
+    var sDone = document.getElementById('s-done');
 
     var sMode = document.getElementById('s-mode');
     var sMaster = document.getElementById('s-master');
@@ -384,6 +454,8 @@
 
     var live = false;   // 目前真的有聲音在輸出
     var busy = false;   // 正在開麥克風／等權限
+    var installHint = null;
+    var askedInstall = false;
 
     // ---------------------------------------------------------------- 設定
     function readSettings() {
@@ -428,6 +500,21 @@
     }
 
     function pct(v) { return v + '%'; }
+
+    // ---------------------------------------------------------------- 設定面板
+    // 顯示狀態只有一個 class，開不起來就是開不起來，不會有半開不開的狀況。
+    function openSettings() {
+      syncControls();
+      sheet.classList.add('on');
+      refreshDevices();
+      if (sDone && sDone.focus) sDone.focus({ preventScroll: true });
+    }
+
+    function closeSettings() {
+      if (!sheet.classList.contains('on')) return;
+      sheet.classList.remove('on');
+      if (gear && gear.focus) gear.focus({ preventScroll: true });
+    }
 
     var MODE_TEXT = {
       headset: {
@@ -971,13 +1058,19 @@
     });
 
     gear.addEventListener('click', function () {
-      syncControls();
-      refreshDevices();
-      dlg.open = true;
+      openSettings();
     });
 
     document.getElementById('s-done').addEventListener('click', function () {
-      dlg.open = false;
+      closeSettings();
+    });
+
+    document.getElementById('sheetScrim').addEventListener('click', function () {
+      closeSettings();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' || e.key === 'Esc') closeSettings();
     });
 
     document.getElementById('s-reset').addEventListener('click', function () {
@@ -1058,6 +1151,40 @@
     syncControls();
     render();
     refreshDevices();
+
+    // 瀏覽器說可以裝就提示一下，長輩不會自己找「加入主畫面」
+    window.addEventListener('beforeinstallprompt', function (e) {
+      e.preventDefault();
+      installHint = e;
+      if (askedInstall) return;
+      askedInstall = true;
+      mdui.snackbar({
+        message: '可以把麥克風加到主畫面嗎？加了就像一個 App，沒有網路也能用。',
+        action: '加到主畫面',
+        onActionClick: function () {
+          if (!installHint) return;
+          installHint.prompt();
+          installHint = null;
+        },
+        autoCloseDelay: 12000
+      });
+    });
+
+    window.addEventListener('appinstalled', function () {
+      installHint = null;
+      mdui.snackbar({ message: '已經加到主畫面了' });
+    });
+
+    // PWA：整個頁面預先抓起來，離線也能開
+    // 用 navigator.serviceWorker 判斷，不要用 'serviceWorker' in navigator：
+    // 不安全頁面裡這個屬性是存在但 undefined，in 會騙人。
+    if (navigator.serviceWorker && window.isSecureContext) {
+      window.addEventListener('load', function () {
+        navigator.serviceWorker.register('sw.js').catch(function () {
+          // 註冊失敗不影響使用，只是離線沒用
+        });
+      });
+    }
   })();
   </script>
 </body>
