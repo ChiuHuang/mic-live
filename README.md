@@ -82,8 +82,16 @@ python -m http.server 8080
 
 ## 線上版
 
-- GitHub Pages：<https://chiuhuang.github.io/mic-live/>（`gh-pages` 分支就是 `main` 的同一份檔案）
-- Vercel：`vercel deploy --prod`，但要先 `vercel login`。
+- Vercel（正式）：<https://mic-live.vercel.app>
+- GitHub Pages（備用）：<https://chiuhuang.github.io/mic-live/> — `gh-pages` 分支，內容跟 `main` 相同
+
+自己更新：
+
+```powershell
+cd C:\Projects\mic-live
+git push                                   # GitHub Pages 會自己重跑
+vercel deploy --prod --yes --scope chiuhuang-projects
+```
 
 ## 目錄
 
