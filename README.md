@@ -6,7 +6,7 @@
 
 ## 用法
 
-1. 打開網頁（線上版見最下面，或在本機跑 `python -m http.server 8080`）。
+1. 打開 <https://chiuhuang.github.io/mic-live/>，或在本機跑 `python -m http.server 8080`。
 2. 按中間那顆大按鈕，第一次會問你要麥克風權限，選「允許」。
 3. 再按一下就暫停。
 
@@ -50,6 +50,11 @@ python -m http.server 8080
 ```
 
 開 <http://localhost:8080/>。
+
+## 線上版
+
+- GitHub Pages：<https://chiuhuang.github.io/mic-live/>（`gh-pages` 分支就是 `main` 的同一份檔案）
+- Vercel：`vercel deploy --prod`，但要先 `vercel login`。
 
 ## 目錄
 
