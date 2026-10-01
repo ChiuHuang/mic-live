@@ -110,11 +110,21 @@
     pointer-events: none;
   }
 
-  .ring.on { animation: pulse 2s ease-out infinite; }
+  .ring.on { animation: pulse 1.8s ease-out infinite; }
 
   @keyframes pulse {
-    0%       { opacity: .5;  transform: scale(.85); }
-    70%,100% { opacity: 0;    transform: scale(1.35); }
+    0%       { opacity: .75; transform: scale(.9); }
+    70%,100% { opacity: 0;   transform: scale(1.42); }
+  }
+
+  /* 監聽中的底圈：靜音的人常常忘記自己開著 */
+  body.live .pad-wrap::before {
+    content: '';
+    position: absolute;
+    inset: .25rem;
+    border-radius: 50%;
+    background: rgb(var(--mdui-color-error, 179 38 30));
+    opacity: .14;
   }
 
   .spinner {
@@ -437,15 +447,18 @@
     // -------------------------------------------------- 回授抑制（喇叭模式）
     var NOTCHES = 4;         // 最多同時壓掉幾個尖叫頻率
     var FFT_SIZE = 4096;     // 2048 個 bin，48 kHz 時一個 bin 11.7 Hz，夠準確地抓頻率
-    var PARK_HZ = 20000;     // 沒用到的陷波器停在這裡
+    var PARK_HZ = 1000;      // 沒用到的濾波器停在這裡（gain 0 時在哪都沒差）
     var HP_HZ = 180;         // 切掉低頻：喇叭自己的低頻最容易被麥克風聽回去
     var LP_HZ = 6500;        // 切掉高頻：回授第一個模式幾乎都在 1-4 kHz
     var SPEAKER_CAP = 0.85;  // 喇叭模式下音量上限，讓回路增益留在 1 以下
-    var HOWL_MIN_HZ = 200;   // 只在這個頻率以上找回授
+    var HOWL_MIN_HZ = 450;   // 人聲的基頻在 85-255 Hz、諧波低於 450 不管，從這裡起才找回授
     var HOWL_MAX_HZ = 11000;
-    var HOWL_RISE = 12;      // 比附近高幾 dB 才算「尖」
-    var HOWL_HITS = 4;       // 連續幾次都尖才真的是回授（人聲不會）
-    var HOWL_MISS = 8;       // 連續幾次沒尖了就放掉
+    var HOWL_MIN_DB = -25;   // 麥克風得真的聽到很大聲才值得找，靜靜唱歌不會被誤判
+    var HOWL_RISE = 20;      // 比附近高幾 dB 才算「尖」（12 dB 會被共振峰騙到）
+    var HOWL_ISOLATION = 15; // 左右三分之一個八度內要低這麼多，才敢說它是孤立的
+    var HOWL_HITS = 8;       // 連續幾次都尖才真的是回授（約 0.4 秒）
+    var HOWL_MISS = 6;       // 連續幾次沒尖了就放掉
+    var HOWL_CUT = -14;      // 壓多少 dB（peaking 的負增益）
     var DUCK_DB = -14;       // 音量突然暴增時收多少
     var DUCK_RISE = 8;       // 比慢速平均高幾 dB 算「突然」
     var fft = null;
@@ -543,7 +556,7 @@
     var MESSAGES = {
       idle: '按下面的大按鈕開始',
       opening: '正在開啟麥克風…',
-      live: '正在播放麥克風的聲音',
+      live: '麥克風監聽中，再按一下暫停',
       paused: '已暫停',
       unplugged: '麥克風被拔掉了，請重新按一下按鈕',
       denied: '麥克風沒有被允許。請按網址旁邊的小圖，選「允許」，再按一次按鈕。',
@@ -615,9 +628,10 @@
       var i;
       for (i = 0; i < NOTCHES; i++) {
         var b = ctx.createBiquadFilter();
-        b.type = 'notch';
-        b.frequency.value = PARK_HZ;  // 停在 20 kHz 等於沒裝這顆濾波器
-        b.Q.value = 18;
+        b.type = 'peaking';      // 挖共振峰，不是挖一個洞，聲音不會整段消失
+        b.frequency.value = PARK_HZ;
+        b.Q.value = 12;
+        b.gain.value = 0;        // 0 dB = 完全透明
         notches.push(b);
       }
 
@@ -732,8 +746,10 @@
     }
 
     // ------------------------------------------------- 回授抑制：找出尖叫的頻率
-    // 回授在頻譜上一定是「又窄又高、又持續不動」的一根尖峰，
-    // 人聲和樂器不會有這種形狀，所以用這個形狀當判準。
+    // 回授在頻譜上是一根「又高、又窄、下面沒有東西、而且持續不動」的尖峰。
+    // 人聲不一樣：每個母音都有好幾個共振峰，而且低八度一定還有基頻和諧波。
+    // 所以除了「高又窄」，還一定要「低半個八度沒有成分」，
+    // 否則會把人聲的共振峰當成回授挖掉 —— 那等於拿自己的聲音開刀。
     function scanHowls() {
       analyser.getFloatFrequencyData(fft);
 
@@ -745,31 +761,42 @@
       var W = 24;               // 背景取左右各 24 個 bin
       var alive = [];
 
-      for (i = 2; i < bins - 2; i++) {
+      for (i = 3; i < bins - 3; i++) {
         var hz = i * binHz;
         if (hz < HOWL_MIN_HZ || hz > HOWL_MAX_HZ) continue;
 
         var m = fft[i];
-        if (m < -50) continue;                                  // 太小的不用管
+        if (m < -45) continue;                                  // 太小的不用管
         if (m <= fft[i - 1] || m <= fft[i + 1]) continue;       // 必須是局部最高
         if (m <= fft[i - 2] || m <= fft[i + 2]) continue;
 
+        // 背景 = 左右兩邊（扣掉峰本身和左右各兩個 bin）的平均功率
         var lo = Math.max(0, i - W);
         var hi = Math.min(bins, i + W + 1);
-        var near = (power[i + 3] - power[i - 2]) + (power[lo] - power[hi - 1]);
-        var span = (i - 2 - lo) + (hi - (i + 3));
+        var side = (power[i - 2] - power[lo]) + (power[hi] - power[i + 3]);
+        var span = (i - 2 - lo) + (hi - i - 3);
         if (span <= 0) continue;
-        var bg = 10 * Math.log10(Math.max(1e-12, near / span));
+        var bg = 10 * Math.log10(Math.max(1e-12, side / span));
         if (m - bg < HOWL_RISE) continue;
 
-        // 2. 這一根尖峰跟哪個候選者配對（容差 1/8 個八度）
+        // 2. 孤不孤立？左右三分之一個八度內有沒有差不多高的峰。
+        //    人聲的共振峰一個接一個、諧波又到處都是；回授只有孤零零一根。
+        var nLo = Math.max(1, Math.floor(i * 0.75));
+        var nHi = Math.min(bins - 1, Math.ceil(i * 1.33));
+        var nMax = -Infinity;
+        for (var s = nLo; s <= nHi; s++) {
+          if (s !== i && fft[s] > nMax) nMax = fft[s];
+        }
+        if (m - nMax < HOWL_ISOLATION) continue;
+
+        // 3. 這一根尖峰跟哪個候選者配對（容差 1/8 個八度）
         var hit = null;
         for (var k = 0; k < howls.length; k++) {
           if (Math.abs(howls[k].hz - hz) <= hz * 0.09) { hit = howls[k]; break; }
         }
 
         if (!hit) {
-          if (howls.length >= 10) continue;                     // 太多就不理，別亂抓
+          if (howls.length >= 6) continue;                      // 太多就不理，別亂抓
           hit = { hz: hz, hits: 1, miss: 0, notch: -1 };
           howls.push(hit);
         } else {
@@ -778,7 +805,7 @@
           hit.miss = 0;
         }
 
-        // 3. 連續尖了幾次才動手，而且必須還有空著的陷波器
+        // 4. 連續尖夠多次才動手，而且必須還有空著的濾波器
         if (hit.hits >= HOWL_HITS && hit.notch < 0) {
           var free = -1;
           for (var n = 0; n < notches.length; n++) {
@@ -787,14 +814,15 @@
           if (free >= 0) {
             var bq = notches[free];
             bq.frequency.setTargetAtTime(hit.hz, ctx.currentTime, 0.005);
-            bq.Q.setTargetAtTime(Math.min(40, Math.max(8, hit.hz / 25)), ctx.currentTime, 0.005);
+            bq.Q.setTargetAtTime(Math.min(25, Math.max(6, hit.hz / 40)), ctx.currentTime, 0.005);
+            bq.gain.setTargetAtTime(HOWL_CUT, ctx.currentTime, 0.01);
             hit.notch = free;
           }
         }
         alive.push(hit);
       }
 
-      // 4. 這次沒出現的：寬容幾次後放掉那顆陷波器
+      // 5. 這次沒出現的：寬容幾次後放掉那顆濾波器
       for (i = 0; i < howls.length; i++) {
         if (alive.indexOf(howls[i]) >= 0) continue;
         if (++howls[i].miss > HOWL_MISS) {
@@ -814,7 +842,7 @@
 
     function park(n) {
       if (n < 0 || !notches[n]) return;
-      notches[n].frequency.setTargetAtTime(PARK_HZ, ctx.currentTime, 0.05);
+      notches[n].gain.setTargetAtTime(0, ctx.currentTime, 0.03);
     }
 
     function releaseHowls(all) {
@@ -892,7 +920,7 @@
 
       // 2) 頻譜掃描，每三幀一次（約 20 次/秒）
       if (++scanCount % 3) return;
-      if (db < -60) { releaseHowls(false); return; }   // 沒聲音就不需要找
+      if (db < HOWL_MIN_DB) { releaseHowls(false); return; }   // 沒聽到很大的聲音就不找
       scanHowls();
     }
 
