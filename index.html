@@ -404,8 +404,16 @@
         </mdui-select>
       </div>
 
+      <div class="row">
+        <span class="label">聲音從哪裡出來</span>
+        <mdui-select id="s-output" variant="outlined" end-icon="">
+          <mdui-menu-item value="">預設</mdui-menu-item>
+        </mdui-select>
+        <span class="sub" id="outputSub"></span>
+      </div>
+
       <div class="row inline">
-        <span class="label">沒人講話時自動靜音</span>
+        <span class="label">沒人講話時自動靜音<small>門檻會自己跟著背景噪音走，吵的地方才關得住</small></span>
         <mdui-switch id="s-gate" checked-icon="" aria-label="沒人講話時自動靜音"></mdui-switch>
       </div>
 
@@ -463,6 +471,9 @@
         <b>鄰近最高</b><span id="d-near">-</span>
         <b>分離度</b><span id="d-iso">-</span>
         <b>演算法判斷</b><span id="d-verdict">-</span>
+        <b>噪聲地板</b><span id="d-floor">-</span>
+        <b>自動靜音門檻</b><span id="d-gate">-</span>
+        <b>輸出裝置</b><span id="d-out">-</span>
         <b>收聲</b><span id="d-duck">-</span>
         <b>慢速平均</b><span id="d-avg">-</span>
         <b>掃描次數</b><span id="d-scans">-</span>
@@ -483,8 +494,10 @@
     'use strict';
 
     var KEY = 'mic-live.settings.v1';
-    var GATE_DB = -55;          // 低於這個音量就自動靜音
-    var GATE_HYSTERESIS = 6;   // 高出 6 dB 才又打開，避免在臨界點跳來跳去
+    var GATE_OPEN = 10;       // 比噪聲地板高 10 dB 才開聲
+    var GATE_CLOSE = 4;       // 掉到比地板高 4 dB 就關
+    var FLOOR_MIN = -70;      // 地板不會比這更低
+    var FLOOR_MAX = -15;      // 也不會高到離譜
     var FADE = 0.02;            // 20 毫秒的音量漸變，開關不會「啵」一聲
 
     var DEFAULTS = {
@@ -492,7 +505,8 @@
       master: 100,   // 聲音大小 %
       input: 100,    // 麥克風靈敏度 %
       deviceId: '',  // 麥克風，空白 = 系統預設
-      gate: false,   // 沒人講話時自動靜音
+      output: '',    // 輸出裝置，空白 = 系統預設
+      gate: true,    // 自動靜音：門檻跟著量到的噪聲地板走，吵的環境才有用
       meter: false,  // 顯示音量條
       theme: 'auto'  // auto | light | dark
     };
@@ -517,6 +531,8 @@
     var sMaster = document.getElementById('s-master');
     var sInput = document.getElementById('s-input');
     var sDevice = document.getElementById('s-device');
+    var sOutput = document.getElementById('s-output');
+    var outputSub = document.getElementById('outputSub');
     var sGate = document.getElementById('s-gate');
     var sMeter = document.getElementById('s-meter');
     var sTheme = document.getElementById('s-theme');
@@ -543,6 +559,14 @@
     var gateOn = true;
     var gateApplied = -1;
     var raf = 0;
+    var floorDb = FLOOR_MIN;   // 噪聲地板：自動靜音和收聲都靠它
+    var floorSeen = false;
+    var floorBuf = new Float32Array(96);
+    var floorIdx = 0;
+    var floorCount = 0;
+    var floorTick = 0;
+    var outputs = [];          // 瀏覽器願意告訴我們的輸出裝置
+    var appliedSink = null;    // 已經設過的輸出，換新的 AudioContext 要清掉
 
     // -------------------------------------------------- 回授抑制（喇叭模式）
     var NOTCHES = 4;         // 最多同時壓掉幾個尖叫頻率
@@ -616,6 +640,7 @@
       sMaster.value = settings.master;
       sInput.value = settings.input;
       sDevice.value = settings.deviceId;
+      sOutput.value = settings.output;
       sGate.checked = settings.gate;
       sMeter.checked = settings.meter;
       sTheme.value = settings.theme;
@@ -702,6 +727,7 @@
       if (ctx) return ctx;
       var AC = window.AudioContext || window.webkitAudioContext;
       ctx = new AC({ latencyHint: 'interactive' });
+      appliedSink = null;      // 新建的 context 一定從預設輸出開始
 
       inGain = ctx.createGain();
       inGain.gain.value = settings.input / 100;
@@ -1132,6 +1158,13 @@
         if (!v.pass) vd.textContent += '：' + v.why.join('、');
       }
 
+      f('d-floor', floorDb.toFixed(1) + ' dB');
+      f('d-gate', settings.gate
+        ? (gateOn ? '開著（高於 ' + (floorDb + GATE_CLOSE).toFixed(1) + '）' : '關著（要 ' + (floorDb + GATE_OPEN).toFixed(1) + ' 才開）')
+        : '關閉功能');
+      f('d-out', outputs.length
+        ? outputs.map(function (d) { return d.label; }).join('、')
+        : '這個瀏覽器不提供清單');
       f('d-duck', duckDb.toFixed(1) + ' dB');
       f('d-avg', avgDb.toFixed(1) + ' dB');
       f('d-scans', String(scanCount));
@@ -1182,9 +1215,13 @@
         meterFill.style.width = Math.round(pctFull * 100) + '%';
       }
 
+      trackFloor(db, dt);
+
       if (settings.gate) {
-        if (gateOn && db < GATE_DB) gateOn = false;
-        else if (!gateOn && db > GATE_DB + GATE_HYSTERESIS) gateOn = true;
+        var open = floorDb + GATE_OPEN;
+        var close = floorDb + GATE_CLOSE;
+        if (gateOn && db < close) gateOn = false;
+        else if (!gateOn && db > open) gateOn = true;
       } else {
         gateOn = true;
       }
@@ -1197,6 +1234,34 @@
 
       if (settings.mode === 'speaker') howlGuard(db, dt);
       drawDebug(db);
+    }
+
+    // ------------------------------------------------- 噪聲地板
+    // 不能用慢速平均當門檻：一個固定的 -55 dB 在吵的環境裡等於沒有門檻，
+    // 因為地板本來就在 -19 dB。要自己量地板，然後用「比地板高幾 dB」當門檻。
+    function trackFloor(db, dt) {
+      // 最小值統計：取最近一秒多的樣本裡第 10 百分位當地板。
+      // 比「慢慢往上爬」快得多（大概一秒就收斂），而且講話中間一定有低點，
+      // 所以不會被講話的音量帶走。
+      floorBuf[floorIdx] = db;
+      floorIdx = (floorIdx + 1) % floorBuf.length;
+      if (floorCount < floorBuf.length) floorCount++;
+      if (!floorSeen) { floorSeen = true; floorDb = db; return; }
+      if (floorCount < floorBuf.length) {
+        if (db < floorDb) floorDb = db;          // 還在收資料，先取最低
+        return;
+      }
+      if (++floorTick % 12) return;              // 每 12 幀算一次就夠了
+
+      var copy = Array.prototype.slice.call(floorBuf);
+      copy.sort(function (a, b) { return a - b; });
+      var p = copy[Math.floor(copy.length * 0.1)];
+
+      if (p < floorDb) floorDb += (p - floorDb) * 0.6;   // 環境變安靜：快點跟上
+      else floorDb += (p - floorDb) * 0.35;             // 環境變吵：跟上但別太急
+
+      if (floorDb < FLOOR_MIN) floorDb = FLOOR_MIN;
+      if (floorDb > FLOOR_MAX) floorDb = FLOOR_MAX;
     }
 
     // ---------------------------------------------------------------- 回授抑制
@@ -1286,6 +1351,7 @@
       // 全部在點擊事件裡發生，Safari 才肯把 AudioContext 開成 running
       ensureContext();
       applyMode();   // 存的模式要在第一次開麥克風時就生效
+      applySink();   // 輸出裝置也是，新的 AudioContext 一定會回到預設，要重設一次
       var wake = ctx.state === 'suspended' ? ctx.resume() : Promise.resolve();
 
       wake
@@ -1386,6 +1452,56 @@
       start();
     }
 
+    // 換輸出裝置：只有瀏覽器給了 setSinkId 才行。iPhone Safari 不支援，
+    // 那種情況就照實說，不要給一個按了沒反應的選單。
+    function canSetSink() {
+      // 還沒開聲音時沒有 ctx 可問，所以看 prototype
+      if (ctx) return typeof ctx.setSinkId === 'function';
+      var AC = window.AudioContext || window.webkitAudioContext;
+      return !!(AC && AC.prototype && typeof AC.prototype.setSinkId === 'function');
+    }
+
+    function applySink() {
+      if (!canSetSink()) {
+        outputSub.textContent = '這個瀏覽器不讓網頁改輸出裝置。請到手機的控制中心（或設定 → 藍牙）切換。';
+        return;
+      }
+      var id = settings.output || '';
+
+      if (!ctx) {
+        // 還沒開聲音就沒有 ctx 可以設，先記著，開始播放時會用上
+        outputSub.textContent = !id && !outputs.length
+          ? '這個瀏覽器沒有提供輸出裝置清單。請到手機的控制中心切換。'
+          : (id ? '記住了。按主按鈕開始播放，就會從「' + (sinkLabel(id) || id) + '」出聲。'
+                : '記住了：使用系統預設的輸出裝置。');
+        return;
+      }
+
+      if (appliedSink === id) return;      // 已經是這個了，別一直重設
+      appliedSink = id;
+
+      try {
+        Promise.resolve(ctx.setSinkId(id)).then(function () {
+          outputSub.textContent = id ? '現在從「' + (sinkLabel(id) || id) + '」出聲。' :
+            '現在從系統預設的輸出裝置出聲。';
+        }).catch(function (err) {
+          appliedSink = null;               // 失敗就允許下次再試
+          outputSub.textContent = '換不過去：' + ((err && err.name) || '瀏覽器拒絕了') +
+            '。請到手機的控制中心切換。';
+        });
+      } catch (err) {
+        appliedSink = null;
+        outputSub.textContent = '換不過去，請到手機的控制中心切換。';
+      }
+    }
+
+    function sinkLabel(id) {
+      for (var i = 0; i < outputs.length; i++) {
+        if (outputs[i].deviceId === id) return outputs[i].label;
+      }
+      return '';
+    }
+
     // ---------------------------------------------------------------- 麥克風清單
     function refreshDevices() {
       if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
@@ -1405,6 +1521,32 @@
           saveSettings();
           if (stream) reopen();   // 存的麥克風不見了，回到系統預設
         }
+
+        // 輸出裝置：網頁不一定能選（iPhone Safari 不行），但可以拿來確認聲音從哪裡出來
+        outputs = [];
+        for (var k = 0; k < list.length; k++) {
+          if (list[k].kind !== 'audiooutput') continue;
+          outputs.push({ deviceId: list[k].deviceId, label: list[k].label || '未命名輸出' });
+        }
+
+        while (sOutput.firstChild) sOutput.removeChild(sOutput.firstChild);
+        var odef = document.createElement('mdui-menu-item');
+        odef.setAttribute('value', '');
+        odef.textContent = '預設';
+        sOutput.appendChild(odef);
+        outputs.forEach(function (d, i) {
+          var o = document.createElement('mdui-menu-item');
+          o.setAttribute('value', d.deviceId);
+          o.textContent = d.label || ('輸出 ' + (i + 1));
+          sOutput.appendChild(o);
+        });
+        if (settings.output && !outputs.some(function (d) { return d.deviceId === settings.output; })) {
+          settings.output = '';
+          saveSettings();
+        }
+        sOutput.value = settings.output;
+        sOutput.disabled = !canSetSink() || outputs.length === 0;
+        applySink();   // 最後由這裡決定要講哪一句
 
         while (sDevice.firstChild) sDevice.removeChild(sDevice.firstChild);
         var def = document.createElement('mdui-menu-item');
@@ -1524,6 +1666,12 @@
       settings.deviceId = sDevice.value;
       saveSettings();
       if (stream) reopen();
+    });
+
+    sOutput.addEventListener('change', function () {
+      settings.output = sOutput.value;
+      saveSettings();
+      applySink();
     });
 
     if (navigator.mediaDevices && 'ondevicechange' in navigator.mediaDevices) {
